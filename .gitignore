@@ -1,0 +1,9 @@
+routing-brain-demo.md
+docs/design/
+docs/superpowers/
+.env
+__pycache__/
+*.pyc
+node_modules/
+dist/
+.venv/
