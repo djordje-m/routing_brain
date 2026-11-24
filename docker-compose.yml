@@ -92,6 +92,8 @@ services:
     build: ./simulator
     environment:
       TRACCAR_OSMAND_URL: "http://traccar:5055"
+    ports:
+      - "${SIMULATOR_PORT:-5001}:5001"
     depends_on:
       bootstrap:
         condition: service_completed_successfully

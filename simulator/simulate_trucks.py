@@ -35,10 +35,13 @@ ingest port (5055):
 import json
 import math
 import os
+import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import requests
+from fastapi import FastAPI, HTTPException
 
 TRACCAR_URL = os.environ.get("TRACCAR_OSMAND_URL", "http://traccar:5055")
 
@@ -50,6 +53,14 @@ TICK_INTERVAL_SECONDS = 5
 REQUEST_TIMEOUT_SECONDS = 5
 
 EARTH_RADIUS_M = 6371000
+
+# Manual pause/resume toggle (demo-operator convenience): a truck whose id is
+# in `paused_trucks` is skipped entirely on each tick (no position computed,
+# no request sent), so its last reported fixTime goes stale. Written from the
+# FastAPI request-handling thread(s) via the routes below, read from the
+# background sender thread's tick loop -- guarded by `paused_trucks_lock`.
+paused_trucks: set[str] = set()
+paused_trucks_lock = threading.Lock()
 
 ROUTES = json.load(open(Path(__file__).parent / "routes.json"))
 ROUTES_BY_TRUCK = {r["truck_id"]: r for r in ROUTES}
@@ -175,7 +186,12 @@ def send_position(truck_id: str, lat: float, lon: float, speed: float, bearing: 
         print(f"{truck_id}: failed to send position: {exc}")
 
 
-def main() -> None:
+def run_simulation_loop() -> None:
+    """The per-tick send loop (from Task 2), run on a background thread.
+
+    Movement math (`position_at_elapsed`) is untouched; the only addition is
+    skipping a paused truck entirely -- no position is even computed for it.
+    """
     print(f"Simulating {len(TRUCK_IDS)} trucks against {TRACCAR_URL} "
           f"every {TICK_INTERVAL_SECONDS}s.")
 
@@ -184,6 +200,11 @@ def main() -> None:
     while True:
         elapsed = time.monotonic() - start_time
         for truck_id in TRUCK_IDS:
+            with paused_trucks_lock:
+                is_paused = truck_id in paused_trucks
+            if is_paused:
+                continue
+
             route = ROUTES_BY_TRUCK[truck_id]
             cumulative = CUMULATIVE_BY_TRUCK[truck_id]
 
@@ -192,6 +213,38 @@ def main() -> None:
             send_position(truck_id, lat, lon, speed, bearing)
 
         time.sleep(TICK_INTERVAL_SECONDS)
+
+
+def main() -> None:
+    """Retained for running the simulator without the HTTP app (not used by
+    the Docker image, which runs it via uvicorn -- see Dockerfile)."""
+    run_simulation_loop()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    thread = threading.Thread(target=run_simulation_loop, daemon=True)
+    thread.start()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+@app.post("/simulator/pause/{truck_id}")
+async def pause_truck(truck_id: str):
+    if truck_id not in TRUCK_IDS:
+        raise HTTPException(status_code=404, detail=f"unknown truck_id: {truck_id}")
+    with paused_trucks_lock:
+        paused_trucks.add(truck_id)
+    return {"status": "paused", "truck_id": truck_id}
+
+
+@app.post("/simulator/resume/{truck_id}")
+async def resume_truck(truck_id: str):
+    with paused_trucks_lock:
+        paused_trucks.discard(truck_id)
+    return {"status": "resumed", "truck_id": truck_id}
 
 
 if __name__ == "__main__":

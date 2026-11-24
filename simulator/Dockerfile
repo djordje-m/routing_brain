@@ -7,4 +7,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY simulate_trucks.py routes.json .
 
-CMD ["python", "simulate_trucks.py"]
+CMD ["uvicorn", "simulate_trucks:app", "--host", "0.0.0.0", "--port", "5001"]
