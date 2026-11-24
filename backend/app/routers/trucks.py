@@ -24,6 +24,7 @@ async def get_latest_trucks():
             "recorded_at": r["recorded_at"].isoformat(),
             "shift_start": r["shift_start"].isoformat() if r["shift_start"] else None,
             "shift_end": r["shift_end"].isoformat() if r["shift_end"] else None,
+            "active_call_id": r["active_call_id"],
         }
         for r in rows
     ]
