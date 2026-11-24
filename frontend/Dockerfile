@@ -6,7 +6,7 @@ WORKDIR /app
 COPY package.json package-lock.json* yarn.lock* ./
 
 # Install dependencies
-RUN npm install --frozen-lockfile 2>/dev/null || npm install
+RUN npm install
 
 # Copy source code
 COPY . .
@@ -14,5 +14,6 @@ COPY . .
 # Expose the development server port
 EXPOSE 5173
 
-# Create .env file from environment variables and run dev server
-CMD sh -c 'echo "VITE_API_BASE=${VITE_API_BASE}" > .env && echo "VITE_WS_URL=${VITE_WS_URL}" >> .env && npm run dev -- --host'
+# Run the development server
+# VITE_* env vars from docker-compose are automatically available via import.meta.env
+CMD npm run dev -- --host
