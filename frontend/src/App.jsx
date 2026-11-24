@@ -28,9 +28,56 @@ function App() {
     let ws
     let cancelled = false
 
+    // Merges a freshly-fetched snapshot into state truck-by-truck, preserving
+    // any fields the snapshot doesn't carry (e.g. a WS-delivered position
+    // that arrived before this fetch resolved).
+    const mergeSnapshot = (data) => {
+      if (cancelled) return
+      setTrucks((prev) => {
+        const next = { ...prev }
+        for (const truck of data) {
+          next[truck.truck_id] = {
+            ...(prev[truck.truck_id] ?? {}),
+            ...truck,
+          }
+        }
+        return next
+      })
+    }
+
+    const fetchSnapshot = () =>
+      fetch(`${import.meta.env.VITE_API_BASE}/trucks/latest`).then((res) =>
+        res.json()
+      )
+
     const openSocket = () => {
       if (cancelled || ws) return
       ws = new WebSocket(import.meta.env.VITE_WS_URL)
+      ws.onopen = () => {
+        // The WS only opens once the backend is actually reachable, so this
+        // is a reliable second chance to pick up shift_start/shift_end --
+        // which never arrive via position_update messages -- in case the
+        // initial fetch ran before any truck had a position (cold boot) or
+        // failed outright. Merge rather than replace so we don't lose
+        // position fields a WS message may have already delivered.
+        fetchSnapshot()
+          .then((data) => {
+            mergeSnapshot(data)
+            // The WS can accept connections before the backend has any
+            // stored positions (it doesn't wait on data existing), so this
+            // fetch can still race the cold-boot window and come back
+            // empty. One short retry covers that without adding real
+            // complexity.
+            if (!cancelled && data.length === 0) {
+              setTimeout(() => {
+                fetchSnapshot().then(mergeSnapshot).catch(() => {})
+              }, 3000)
+            }
+          })
+          .catch((err) => {
+            console.error('Failed to refresh truck snapshot on WS open:', err)
+          })
+      }
       ws.onmessage = (event) => {
         const envelope = JSON.parse(event.data)
         if (envelope.type !== 'position_update') return

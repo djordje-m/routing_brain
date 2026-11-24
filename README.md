@@ -54,6 +54,12 @@ curl -X POST http://localhost:5001/simulator/resume/truck-10
 # truck-10 resumes from where it paused, not teleported ahead
 ```
 
+Markers use three colors: green (`available`), grey (`stale`), and dark
+slate-blue `#34495e` (`off_shift` — the truck's seeded driver shift hasn't
+started yet, or has already ended). `off_shift` takes visual precedence over
+`stale` when both would apply. Trucks `truck-01` and `truck-11` are seeded
+with an already-ended shift, so they render off-shift from boot.
+
 ## What's real and what's simplified
 
 **Real:**
@@ -68,8 +74,8 @@ curl -X POST http://localhost:5001/simulator/resume/truck-10
   runtime dependency on that public server.
 - The live map is genuinely live: an initial REST snapshot, then WebSocket
   pushes on real accepted positions only (not polling, not a timer).
-- Truck status (`available`/`stale`) is computed continuously against the
-  viewer's own clock — never stored, never goes stale itself.
+- Truck status (`available`/`stale`/`off_shift`) is computed continuously
+  against the viewer's own clock — never stored, never goes stale itself.
 
 **Simplified, on purpose, for a 2-day demo:**
 - The 20 trucks are simulated, not real Teltonika hardware — the simulator
@@ -89,8 +95,7 @@ curl -X POST http://localhost:5001/simulator/resume/truck-10
   suite. That's a real coverage gap, named rather than hidden: the part of
   this system least familiar going in (PostGIS SQL under a non-transactional
   read-then-write) is exactly the part with no automated regression net.
-- No truck types, driver shifts, dispatcher assignment, ETA, or route
-  planning yet — see Status below.
+- No dispatcher assignment, ETA, or route planning yet — see Status below.
 
 ## Status
 
@@ -99,7 +104,7 @@ curl -X POST http://localhost:5001/simulator/resume/truck-10
   PostGIS, with dedup/out-of-order handling
 - [x] **Live console** — WebSocket-driven map, real route replay, manual
   stale-trigger toggle for demoing
-- [ ] Truck/shift data (truck types, driver shifts)
+- [x] Truck/shift data (truck types, driver shifts)
 - [ ] Assignment engine (dispatcher picks a truck for a call, ranked by ETA)
 - [ ] ETA refresh (background job, pushed live)
 - [ ] Daily route planning with OR-Tools (nice to have)
