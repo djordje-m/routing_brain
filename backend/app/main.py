@@ -15,6 +15,7 @@ from app.repository.positions import (
     insert_position,
     upsert_latest_position,
 )
+from app.routers.trucks import router as trucks_router
 from app.seed_trucks import seed_trucks
 from app.services.ingest import apply_decision, decide
 
@@ -30,6 +31,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+app.include_router(trucks_router)
 
 
 @app.get("/health")
