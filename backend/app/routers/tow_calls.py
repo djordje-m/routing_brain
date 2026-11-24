@@ -6,6 +6,7 @@ eligibility rechecking, ranking, ETA estimation) lives in
 requests, calls into those pieces, and shapes responses.
 """
 
+import asyncpg
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -63,6 +64,28 @@ async def _compute_top_candidates(
     ]
 
 
+async def _rejected_with_fresh_candidates(
+    pool, required_truck_type: str, pickup_lat: float, pickup_lon: float
+) -> JSONResponse:
+    """Build the 409 response body for "this truck is no longer usable
+    for this tow call" -- whether that's because it failed the early
+    eligibility check or lost the atomic assignment race in
+    `assign_truck`. Always recomputes candidates fresh; never reuses a
+    list computed earlier in the request.
+    """
+    fresh_candidates = await _compute_top_candidates(
+        pool, required_truck_type, pickup_lat, pickup_lon
+    )
+    return JSONResponse(
+        status_code=409,
+        content={
+            "status": "rejected",
+            "reason": "truck_no_longer_eligible",
+            "candidates": fresh_candidates,
+        },
+    )
+
+
 @router.post("/tow-calls")
 async def create_tow_call_endpoint(body: CreateTowCallRequest):
     pool = await get_pool()
@@ -91,20 +114,19 @@ async def confirm_tow_call_endpoint(tow_call_id: int, body: ConfirmTowCallReques
 
     # Never trust that the candidate list shown at create time is still
     # valid -- recheck this specific truck against the DB right now.
+    # Fast-path early-exit for the common, non-racing case (shift ended,
+    # wrong type, already assigned as of this plain read). This check
+    # alone does NOT close the race against another concurrent confirm
+    # for the same truck -- it's a separate read before the write, so a
+    # second request could still slip past it before either writes. The
+    # actual guard against that is the atomic conditional UPDATE inside
+    # assign_truck() below.
     eligible = await is_truck_still_eligible(
         pool, body.truck_id, required_truck_type
     )
     if not eligible:
-        fresh_candidates = await _compute_top_candidates(
+        return await _rejected_with_fresh_candidates(
             pool, required_truck_type, pickup_lat, pickup_lon
-        )
-        return JSONResponse(
-            status_code=409,
-            content={
-                "status": "rejected",
-                "reason": "truck_no_longer_eligible",
-                "candidates": fresh_candidates,
-            },
         )
 
     # Truck is eligible -- recompute its ETA fresh via a direct location
@@ -115,16 +137,8 @@ async def confirm_tow_call_endpoint(tow_call_id: int, body: ConfirmTowCallReques
         # Eligible per the DB query above but has no known position --
         # treat the same as "no longer usable" and hand back fresh
         # candidates rather than crash or assign a truck we can't locate.
-        fresh_candidates = await _compute_top_candidates(
+        return await _rejected_with_fresh_candidates(
             pool, required_truck_type, pickup_lat, pickup_lon
-        )
-        return JSONResponse(
-            status_code=409,
-            content={
-                "status": "rejected",
-                "reason": "truck_no_longer_eligible",
-                "candidates": fresh_candidates,
-            },
         )
 
     provider = get_eta_provider()
@@ -133,7 +147,21 @@ async def confirm_tow_call_endpoint(tow_call_id: int, body: ConfirmTowCallReques
     )
     eta_seconds = etas[0]
 
-    await assign_truck(pool, tow_call_id, body.truck_id, eta_seconds)
+    # assign_truck()'s own WHERE clause re-checks "is this truck still
+    # free" atomically with the write, closing the TOCTOU window the
+    # is_truck_still_eligible() check above cannot close on its own. A
+    # UNIQUE index backs this further still (see schema.sql) -- if that
+    # index is what catches the race instead of the conditional UPDATE,
+    # asyncpg raises UniqueViolationError, handled the same way below.
+    try:
+        assigned = await assign_truck(pool, tow_call_id, body.truck_id, eta_seconds)
+    except asyncpg.UniqueViolationError:
+        assigned = False
+
+    if not assigned:
+        return await _rejected_with_fresh_candidates(
+            pool, required_truck_type, pickup_lat, pickup_lon
+        )
 
     return {"status": "assigned", "truck_id": body.truck_id, "eta_seconds": eta_seconds}
 

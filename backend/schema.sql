@@ -48,3 +48,19 @@ CREATE TABLE IF NOT EXISTS tow_calls (
     eta_seconds DOUBLE PRECISION,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Belt-and-suspenders guard against double-dispatching one truck to two
+-- non-completed tow calls. The application-level fix for this is the
+-- atomic conditional UPDATE in assign_truck() (see
+-- app/repository/tow_calls.py), but that statement's own NOT EXISTS
+-- subquery is a plain (non-locking) read of other rows in this same
+-- table, so under READ COMMITTED it is only as airtight as per-statement
+-- MVCC visibility allows for two different target rows racing each
+-- other. A real unique index is enforced by Postgres's own index-level
+-- conflict detection across concurrent transactions regardless of
+-- snapshot timing, so it is the actual backstop; the conditional UPDATE
+-- stays as the primary mechanism since it avoids a constraint-violation
+-- exception in the overwhelmingly common non-racing case.
+CREATE UNIQUE INDEX IF NOT EXISTS tow_calls_one_active_assignment_per_truck
+    ON tow_calls (assigned_truck_id)
+    WHERE status != 'completed' AND assigned_truck_id IS NOT NULL;

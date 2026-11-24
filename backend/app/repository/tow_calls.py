@@ -103,18 +103,54 @@ async def get_tow_call(pool: asyncpg.Pool, tow_call_id: int) -> asyncpg.Record |
 
 async def assign_truck(
     pool: asyncpg.Pool, tow_call_id: int, truck_id: int, eta_seconds: float
-) -> None:
-    """Mark a tow call as assigned to a truck with the given ETA."""
-    await pool.execute(
+) -> bool:
+    """Atomically assign a truck to a tow call, but only if the truck is
+    still free at the moment of the write.
+
+    This closes the TOCTOU window between a separate "is this truck still
+    eligible" check and a separate write: two concurrent confirm requests
+    for the same truck against two different tow calls could otherwise
+    both pass an eligibility check before either writes, then both
+    assign -- double-dispatching one truck. Folding the check into the
+    UPDATE's own WHERE clause means the "truck still free" condition and
+    the write happen in one statement rather than two separate
+    round-trips.
+
+    A `UNIQUE` index (`tow_calls_one_active_assignment_per_truck` in
+    schema.sql) on `assigned_truck_id WHERE status != 'completed'` is the
+    real backstop underneath this: the conditional `NOT EXISTS` here is a
+    plain, non-locking read of sibling rows, so on its own it is only as
+    strong as per-statement MVCC visibility allows when two different
+    tow-call rows race each other. The unique index makes Postgres itself
+    refuse a second concurrent assignment via index-level conflict
+    detection, independent of snapshot timing. If that index is violated
+    (the rare race the `NOT EXISTS` check alone didn't catch in time),
+    this raises `asyncpg.UniqueViolationError`, which the caller should
+    treat the same as a `False` return.
+
+    Returns True if the assignment happened, False if the truck was
+    already assigned to some other non-completed tow call by the time
+    this statement ran (i.e. lost the race, or failed the early
+    eligibility check for an unrelated reason).
+    """
+    row = await pool.fetchrow(
         """
         UPDATE tow_calls
         SET assigned_truck_id = $1, status = 'assigned', eta_seconds = $2
         WHERE id = $3
+          AND NOT EXISTS (
+            SELECT 1 FROM tow_calls tc2
+            WHERE tc2.assigned_truck_id = $1
+              AND tc2.status != 'completed'
+              AND tc2.id != $3
+          )
+        RETURNING id
         """,
         truck_id,
         eta_seconds,
         tow_call_id,
     )
+    return row is not None
 
 
 async def complete_tow_call(pool: asyncpg.Pool, tow_call_id: int) -> None:
