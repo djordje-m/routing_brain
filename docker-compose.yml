@@ -105,6 +105,7 @@ services:
     environment:
       VITE_API_BASE: "http://localhost:${BACKEND_PORT:-8000}"
       VITE_WS_URL: "ws://localhost:${BACKEND_PORT:-8000}/ws"
+      VITE_STALE_THRESHOLD_SECONDS: "${STALE_THRESHOLD_SECONDS:-120}"
 
 volumes:
   db_data:
