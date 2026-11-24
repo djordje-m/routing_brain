@@ -6,7 +6,7 @@ import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket
 
 from app.db import apply_schema, get_pool
 from app.repository.positions import (
@@ -18,6 +18,7 @@ from app.repository.positions import (
 from app.routers.trucks import router as trucks_router
 from app.seed_trucks import seed_trucks
 from app.services.ingest import apply_decision, decide
+from app.ws import manager, websocket_endpoint
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,11 @@ app.include_router(trucks_router)
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.websocket("/ws")
+async def ws_route(websocket: WebSocket):
+    await websocket_endpoint(websocket)
 
 
 @app.post("/ingest/position")
@@ -88,6 +94,16 @@ async def ingest_position(request: Request):
                 pool, truck_id, lat, lon, speed, heading, recorded_at
             ),
         )
+
+        if outcome == "accept":
+            await manager.broadcast({
+                "type": "position_update",
+                "data": {
+                    "truck_id": truck_id, "lat": lat, "lon": lon,
+                    "speed": speed, "heading": heading,
+                    "recorded_at": recorded_at.isoformat(),
+                },
+            })
 
         return {"status": "ok", "outcome": outcome}
 
