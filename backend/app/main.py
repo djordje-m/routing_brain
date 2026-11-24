@@ -17,6 +17,7 @@ from app.repository.positions import (
     upsert_latest_position,
 )
 from app.routers.trucks import router as trucks_router
+from app.seed_shifts import seed_drivers_and_shifts
 from app.seed_trucks import seed_trucks
 from app.services.ingest import apply_decision, decide
 from app.ws import manager, websocket_endpoint
@@ -29,6 +30,7 @@ async def lifespan(app: FastAPI):
     pool = await get_pool()
     await apply_schema(pool)
     await seed_trucks(pool)
+    await seed_drivers_and_shifts(pool)
     yield
 
 
