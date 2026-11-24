@@ -46,6 +46,14 @@ services:
       - traccar
     restart: "no"
 
+  simulator:
+    build: ./simulator
+    environment:
+      TRACCAR_OSMAND_URL: "http://traccar:5055"
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+
 volumes:
   db_data:
   traccar_data:
