@@ -27,5 +27,25 @@ services:
       db:
         condition: service_healthy
 
+  traccar:
+    image: traccar/traccar:latest
+    ports:
+      - "${TRACCAR_WEB_PORT}:8082"
+      - "${TRACCAR_OSMAND_PORT}:5055"
+    volumes:
+      - traccar_data:/opt/traccar/data
+
+  bootstrap:
+    build: ./backend
+    command: ["python", "bootstrap_traccar.py"]
+    environment:
+      TRACCAR_URL: "http://traccar:8082"
+      TRACCAR_ADMIN_EMAIL: ${TRACCAR_ADMIN_EMAIL}
+      TRACCAR_ADMIN_PASSWORD: ${TRACCAR_ADMIN_PASSWORD}
+    depends_on:
+      - traccar
+    restart: "no"
+
 volumes:
   db_data:
+  traccar_data:
