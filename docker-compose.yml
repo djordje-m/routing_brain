@@ -54,6 +54,14 @@ services:
       bootstrap:
         condition: service_completed_successfully
 
+  frontend:
+    build: ./frontend
+    ports:
+      - "${FRONTEND_PORT}:5173"
+    environment:
+      VITE_API_BASE: "http://localhost:${BACKEND_PORT}"
+      VITE_WS_URL: "ws://localhost:${BACKEND_PORT}/ws"
+
 volumes:
   db_data:
   traccar_data:
