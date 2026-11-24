@@ -133,7 +133,11 @@ session; no page reload required.
   environment. `DistanceBasedEta` (straight-line haversine distance at a
   fixed urban speed) is what every live demo actually uses; the two are
   interchangeable behind one `EtaProvider` interface, selected by whether
-  `GOOGLE_ROUTES_API_KEY` is set.
+  `GOOGLE_ROUTES_API_KEY` is set. `POST /tow-calls` now catches
+  `GoogleRoutesEtaError` and returns a 502 instead of an unhandled 500, so
+  a bad/quota-exhausted key fails loud and readable rather than silently
+  — but since this path has never run end-to-end against the live API,
+  treat it as untested if you actually set a real key here.
 - No daily route planning yet — see Status below.
 
 ## Status

@@ -311,6 +311,26 @@ function App() {
     })
       .then((res) => {
         if (!res.ok) throw new Error(`Unexpected complete response: ${res.status}`)
+        // The truck assigned to this call was optimistically marked
+        // en_route (active_call_id set) in handleConfirmCandidate's
+        // success path, and nothing else ever clears it client-side --
+        // position_update WS messages spread the existing truck entry,
+        // so a stale active_call_id would otherwise survive indefinitely
+        // and keep showing the marker as en_route (and offering it as a
+        // candidate again) even though the backend has already freed it.
+        // The activeCalls entry still carries the truck_id from when it
+        // was added (read via closure, not inside the setActiveCalls
+        // updater, to keep that updater a pure state transition).
+        const assignedTruckId = activeCalls[towCallId]?.truck_id
+        if (assignedTruckId != null) {
+          setTrucks((prevTrucks) => ({
+            ...prevTrucks,
+            [assignedTruckId]: {
+              ...(prevTrucks[assignedTruckId] ?? {}),
+              active_call_id: null,
+            },
+          }))
+        }
         setActiveCalls((prev) => {
           const next = { ...prev }
           delete next[towCallId]
@@ -454,7 +474,20 @@ function App() {
                       </select>
                     </label>
                   </div>
-                  <button onClick={handleCreateCall}>Create Call</button>
+                  <button
+                    onClick={(e) => {
+                      // Same leaked-click-into-ClickCapture concern as the
+                      // close button above. Currently incidental protection
+                      // comes from pendingCall still being non-null when
+                      // this fires (handleMapClick's own guard absorbs the
+                      // leaked click), but that's fragile -- stop it
+                      // explicitly so correctness doesn't depend on that.
+                      e.stopPropagation()
+                      handleCreateCall()
+                    }}
+                  >
+                    Create Call
+                  </button>
                   {pendingCall.error && (
                     <div style={{ color: 'red' }}>{pendingCall.error}</div>
                   )}
@@ -470,7 +503,15 @@ function App() {
                   {pendingCall.candidates.map((c) => (
                     <div key={c.truck_id}>
                       {c.name} ({Math.round(c.eta_seconds / 60)} min){' '}
-                      <button onClick={() => handleConfirmCandidate(c.truck_id)}>
+                      <button
+                        onClick={(e) => {
+                          // Same leaked-click concern as the close/Create
+                          // Call buttons -- stop it explicitly rather than
+                          // relying on the incidental pendingCall guard.
+                          e.stopPropagation()
+                          handleConfirmCandidate(c.truck_id)
+                        }}
+                      >
                         Confirm
                       </button>
                     </div>
@@ -497,7 +538,18 @@ function App() {
               <div>
                 <div>{call.truck_name}</div>
                 <div>ETA: {Math.round(call.eta_seconds / 60)} min</div>
-                <button onClick={() => handleCompleteCall(call.tow_call_id)}>
+                <button
+                  onClick={(e) => {
+                    // Unlike Create Call/Confirm, this button is clicked
+                    // precisely when pendingCall IS null, so the leaked
+                    // click isn't absorbed by handleMapClick's guard and
+                    // would otherwise open an unwanted new pending-call
+                    // popup at this marker's location. Same fix as the
+                    // close button in the other popup (see commit 6d95a5c).
+                    e.stopPropagation()
+                    handleCompleteCall(call.tow_call_id)
+                  }}
+                >
                   Mark Complete
                 </button>
               </div>
