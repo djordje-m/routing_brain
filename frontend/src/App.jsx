@@ -5,6 +5,7 @@ import 'leaflet/dist/leaflet.css'
 const CHICAGO_CENTER = [41.8781, -87.6298]
 const STALE_COLOR = '#95a5a6'
 const FRESH_COLOR = '#2ecc71'
+const OFF_SHIFT_COLOR = '#34495e'
 const STALE_THRESHOLD_SECONDS = Number(
   import.meta.env.VITE_STALE_THRESHOLD_SECONDS
 )
@@ -96,13 +97,18 @@ function App() {
             new Date(truck.recorded_at).getTime() / 1000
           const isStale =
             nowSeconds - recordedAtSeconds > STALE_THRESHOLD_SECONDS
+          const isOffShift =
+            truck.shift_start && truck.shift_end &&
+            (nowSeconds < new Date(truck.shift_start).getTime() / 1000 ||
+             nowSeconds > new Date(truck.shift_end).getTime() / 1000)
+          const color = isOffShift ? OFF_SHIFT_COLOR : isStale ? STALE_COLOR : FRESH_COLOR
           return (
             <CircleMarker
               key={truck.truck_id}
               center={[truck.lat, truck.lon]}
               radius={8}
-              fillColor={isStale ? STALE_COLOR : FRESH_COLOR}
-              color={isStale ? STALE_COLOR : FRESH_COLOR}
+              fillColor={color}
+              color={color}
               fillOpacity={0.9}
             />
           )
