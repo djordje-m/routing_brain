@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   MapContainer,
   TileLayer,
@@ -159,6 +159,26 @@ function App() {
     }
   }, [])
 
+  // Stable [lat, lng] for the current pending call. Memoized for two
+  // reasons:
+  // 1. react-leaflet's Marker/Popup only re-apply a `position` change when
+  //    the prop changes *by reference*
+  //    (@react-leaflet/core's updateMarker does
+  //    `props.position !== prevProps.position`) -- an inline
+  //    `[pendingCall.lat, pendingCall.lng]` array literal is a *new* array
+  //    on every single re-render of App (every 5s tick, every WS
+  //    position_update for any of the 20 trucks), which would cause
+  //    needless setLatLng() churn on every one of those re-renders even
+  //    though the coordinates never actually changed.
+  // 2. It's also exactly the Popup's own `position` prop (see below), and
+  //    @react-leaflet/core's usePopupLifecycle keys its open/bind effect
+  //    on that same prop -- a stable reference means that effect only
+  //    re-runs on a genuinely new pending call, not on unrelated re-renders.
+  const pendingPosition = useMemo(
+    () => (pendingCall ? [pendingCall.lat, pendingCall.lng] : null),
+    [pendingCall?.lat, pendingCall?.lng]
+  )
+
   const nowSeconds = Date.now() / 1000
 
   const handleMapClick = (latlng) => {
@@ -187,8 +207,23 @@ function App() {
         required_truck_type: pendingCall.truckType,
       }),
     })
-      .then((res) => res.json())
-      .then((data) => {
+      .then(async (res) => {
+        const data = await res.json()
+        if (!res.ok) {
+          // A non-2xx body won't have a `candidates` array, and the render
+          // branch below only checks `candidates === null` to decide
+          // whether to show the type-selector vs. the candidate list --
+          // an `undefined` candidates array would otherwise fall into the
+          // candidate-list branch and crash calling .length/.map on it.
+          // Keep `candidates` null so it stays on the selector view, and
+          // surface the failure inline instead.
+          setPendingCall((prev) =>
+            prev
+              ? { ...prev, error: 'Failed to create call -- try again.' }
+              : prev
+          )
+          return
+        }
         setPendingCall((prev) =>
           prev
             ? {
@@ -336,22 +371,68 @@ function App() {
 
         <ClickCapture onMapClick={handleMapClick} />
 
-        {pendingCall && (
-          <Marker
-            position={[pendingCall.lat, pendingCall.lng]}
-            // react-leaflet's Popup-as-child only opens when the marker
-            // itself is clicked, not automatically on mount -- but we want
-            // the popup to appear immediately after the map click that
-            // created this marker, without requiring a second click on it.
-            ref={(marker) => {
-              if (marker) marker.openPopup()
-            }}
-          >
+        {pendingCall && pendingPosition && (
+          <>
+            {/* Plain pin for the pending call's location. Deliberately NOT
+                wrapping a <Popup> as its child: @react-leaflet/core's
+                usePopupLifecycle only *opens* a marker-nested popup via an
+                imperative openPopup() call from outside (Popup-as-child
+                just binds on mount, it doesn't auto-open) -- and under
+                React 18 StrictMode's dev-only double-invoke-effects-on-mount
+                behavior (which the actual `npm run dev` deployment runs
+                under), a parent-level effect calling openPopup() only
+                fires once, sandwiched *before* the child Popup's own
+                mount->cleanup->remount dance finishes, leaving the popup
+                freshly re-bound but never reopened. Rendering Popup
+                directly under MapContainer instead sidesteps this: its own
+                lifecycle effect calls instance.openOn(map) directly, so it
+                reliably ends up open regardless of how many times
+                StrictMode re-invokes that same effect. */}
+            <Marker position={pendingPosition} />
             <Popup
+              position={pendingPosition}
               autoClose={false}
               closeOnClick={false}
-              onClose={() => setPendingCall(null)}
+              // Leaflet's own close button is disabled in favor of a plain
+              // React button below that calls setPendingCall(null)
+              // directly. react-leaflet has no `onClose` prop (Popup's
+              // props are just PopupOptions + eventHandlers), and the
+              // Leaflet-level event that corresponds to "closed" is fired
+              // on the *popup instance* as 'remove' (not 'popupclose' --
+              // that name is a map-level event) -- which also fires as
+              // part of React 18 StrictMode's dev-only
+              // mount->cleanup->remount dance on this popup's first mount,
+              // so wiring through it risked resetting pendingCall back to
+              // null moments after a brand-new pending call was created.
+              // A real onClick handler in our own JSX has no such
+              // ambiguity.
+              closeButton={false}
             >
+              <div>
+                {/* Literal "×" (U+00D7), not the HTML entity "&times;" --
+                    JSX text children are not parsed as HTML, so an entity
+                    reference would render as the literal 6-character
+                    string "&times;" instead of being decoded. */}
+                <button
+                  onClick={(e) => {
+                    // Without stopping propagation, this click also
+                    // bubbles through to the map's own click handling
+                    // (ClickCapture) -- since that handler's "ignore while
+                    // a pending call is open" guard reads `pendingCall`
+                    // from its own render's closure, it still sees the
+                    // *old* (non-null) value for this same click and would
+                    // otherwise immediately open a brand-new pending call
+                    // at this popup's screen location right after we just
+                    // cleared it.
+                    e.stopPropagation()
+                    setPendingCall(null)
+                  }}
+                  style={{ float: 'right' }}
+                  aria-label="Close"
+                >
+                  ×
+                </button>
+              </div>
               {pendingCall.candidates === null ? (
                 <div>
                   <div>
@@ -400,7 +481,7 @@ function App() {
                 </div>
               )}
             </Popup>
-          </Marker>
+          </>
         )}
 
         {Object.values(activeCalls).map((call) => (
