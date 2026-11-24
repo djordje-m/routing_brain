@@ -1,11 +1,13 @@
-"""Stub truck position simulator: sends random-jitter GPS positions for the
+"""Truck position simulator: replays pre-baked real-street routes for the
 20 bootstrapped Traccar devices (`truck-01`..`truck-20`) over the OsmAnd HTTP
 protocol.
 
-This is a deliberate throwaway stub for Milestone 1 — its only job is to get
-positions flowing and visibly moving on the map. A later milestone rewrites
-the movement logic in place to replay pre-baked real-street routes; the
-device-ID scheme and the OsmAnd target stay the same.
+Each truck follows its own route from `simulator/routes.json` (one real
+street-geometry route per truck, built in a prior milestone task) at a
+constant speed derived from that route's own `distance_m` / `duration_s`.
+Looping is "ping-pong": once a truck reaches the end of its route it reverses
+and retraces the same polyline back to the start, then forward again, and so
+on — it never teleports back to the start.
 
 Verified against a live `traccar/traccar:latest` container on the OsmAnd
 ingest port (5055):
@@ -30,10 +32,11 @@ ingest port (5055):
   registering all 20 devices before this service starts.
 """
 
+import json
 import math
 import os
-import random
 import time
+from pathlib import Path
 
 import requests
 
@@ -41,50 +44,109 @@ TRACCAR_URL = os.environ.get("TRACCAR_OSMAND_URL", "http://traccar:5055")
 
 TRUCK_IDS = [f"truck-{n:02d}" for n in range(1, 21)]
 
-# Downtown Chicago.
-BASE_LAT = 41.8781
-BASE_LON = -87.6298
-
-# Lay the 20 trucks out on a 4x5 grid around the base coordinate so they
-# don't all start stacked on top of each other. ~0.01 degrees of latitude is
-# roughly 1.1km, which keeps the whole fleet visible on a city-scale map.
-GRID_COLUMNS = 5
-GRID_SPACING_DEGREES = 0.01
-
 # Per-tick movement.
 TICK_INTERVAL_SECONDS = 5
-JITTER_DEGREES = 0.0005
-
-# Keep each truck wandering near its own grid slot rather than drifting
-# unboundedly — this is a visual stub, not a route engine.
-MAX_RADIUS_FROM_CENTER_DEGREES = 0.01
 
 REQUEST_TIMEOUT_SECONDS = 5
 
+EARTH_RADIUS_M = 6371000
 
-def truck_center(index: int) -> tuple[float, float]:
-    """Fixed per-truck base coordinate (grid offset from downtown Chicago)."""
-    row, col = divmod(index, GRID_COLUMNS)
-    lat = BASE_LAT + row * GRID_SPACING_DEGREES
-    lon = BASE_LON + col * GRID_SPACING_DEGREES
-    return lat, lon
+ROUTES = json.load(open(Path(__file__).parent / "routes.json"))
+ROUTES_BY_TRUCK = {r["truck_id"]: r for r in ROUTES}
 
 
-def clamp_to_radius(
-    lat: float, lon: float, center_lat: float, center_lon: float, max_radius: float
-) -> tuple[float, float]:
-    """Pull a candidate position back toward its center if it strayed too far.
+def haversine(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
+    """Great-circle distance between two lon/lat points, in meters."""
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    d_phi = math.radians(lat2 - lat1)
+    d_lambda = math.radians(lon2 - lon1)
 
-    Plain degree-distance is good enough at this scale and latitude band —
-    no need for real haversine math in a throwaway stub.
+    a = (
+        math.sin(d_phi / 2) ** 2
+        + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2) ** 2
+    )
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return EARTH_RADIUS_M * c
+
+
+def build_cumulative_distances(coordinates: list[list[float]]) -> list[float]:
+    """Cumulative haversine distance (meters) along a route's coordinates."""
+    cumulative = [0.0]
+    for i in range(1, len(coordinates)):
+        lon1, lat1 = coordinates[i - 1]
+        lon2, lat2 = coordinates[i]
+        cumulative.append(cumulative[-1] + haversine(lon1, lat1, lon2, lat2))
+    return cumulative
+
+
+CUMULATIVE_BY_TRUCK = {
+    truck_id: build_cumulative_distances(route["coordinates"])
+    for truck_id, route in ROUTES_BY_TRUCK.items()
+}
+
+
+def position_at_elapsed(
+    route: dict, cumulative: list[float], elapsed_seconds: float
+) -> tuple[float, float, float, float]:
+    """Compute (lat, lon, bearing_degrees, speed_mps) for a route at a given
+    elapsed time, replaying it at constant speed with ping-pong looping.
+
+    Pure function: no I/O, no global state mutation.
     """
-    d_lat = lat - center_lat
-    d_lon = lon - center_lon
-    distance = (d_lat**2 + d_lon**2) ** 0.5
-    if distance <= max_radius or distance == 0:
-        return lat, lon
-    scale = max_radius / distance
-    return center_lat + d_lat * scale, center_lon + d_lon * scale
+    distance_m = route["distance_m"]
+    duration_s = route["duration_s"]
+    coordinates = route["coordinates"]
+
+    speed_mps = distance_m / duration_s
+
+    cycle_length = 2 * distance_m
+    raw_distance = speed_mps * elapsed_seconds
+    pos_in_cycle = raw_distance % cycle_length
+    forward_distance = (
+        pos_in_cycle if pos_in_cycle <= distance_m else cycle_length - pos_in_cycle
+    )
+
+    # Linear search for the segment containing forward_distance. Route
+    # point counts here are small (low hundreds), so this is cheap enough
+    # per tick; a bisect would also work but isn't needed at this scale.
+    segment_index = 0
+    for i in range(1, len(cumulative)):
+        if cumulative[i] >= forward_distance:
+            segment_index = i - 1
+            break
+    else:
+        segment_index = len(cumulative) - 2
+
+    seg_start_distance = cumulative[segment_index]
+    seg_end_distance = cumulative[segment_index + 1]
+    seg_length = seg_end_distance - seg_start_distance
+
+    lon1, lat1 = coordinates[segment_index]
+    lon2, lat2 = coordinates[segment_index + 1]
+
+    if seg_length > 0:
+        fraction = (forward_distance - seg_start_distance) / seg_length
+    else:
+        fraction = 0.0
+
+    lat = lat1 + (lat2 - lat1) * fraction
+    lon = lon1 + (lon2 - lon1) * fraction
+
+    # Reuse the existing atan2-based bearing convention from this project
+    # (delta-lon, delta-lat), using the segment's own direction of travel.
+    # On the return leg of the ping-pong, the segment is still walked from
+    # its lower-distance endpoint to its higher-distance endpoint, so flip
+    # the direction vector when travelling backward.
+    if pos_in_cycle <= distance_m:
+        d_lat = lat2 - lat1
+        d_lon = lon2 - lon1
+    else:
+        d_lat = lat1 - lat2
+        d_lon = lon1 - lon2
+    bearing_degrees = math.degrees(math.atan2(d_lon, d_lat)) % 360
+
+    return lat, lon, bearing_degrees, speed_mps
 
 
 def send_position(truck_id: str, lat: float, lon: float, speed: float, bearing: float) -> None:
@@ -108,27 +170,17 @@ def main() -> None:
     print(f"Simulating {len(TRUCK_IDS)} trucks against {TRACCAR_URL} "
           f"every {TICK_INTERVAL_SECONDS}s.")
 
-    # Current position and center per truck, keyed by index.
-    centers = [truck_center(i) for i in range(len(TRUCK_IDS))]
-    positions = list(centers)
+    start_time = time.monotonic()
 
     while True:
-        for i, truck_id in enumerate(TRUCK_IDS):
-            center_lat, center_lon = centers[i]
-            lat, lon = positions[i]
+        elapsed = time.monotonic() - start_time
+        for truck_id in TRUCK_IDS:
+            route = ROUTES_BY_TRUCK[truck_id]
+            cumulative = CUMULATIVE_BY_TRUCK[truck_id]
 
-            d_lat = random.uniform(-JITTER_DEGREES, JITTER_DEGREES)
-            d_lon = random.uniform(-JITTER_DEGREES, JITTER_DEGREES)
-            new_lat, new_lon = clamp_to_radius(
-                lat + d_lat, lon + d_lon, center_lat, center_lon,
-                MAX_RADIUS_FROM_CENTER_DEGREES,
-            )
-            positions[i] = (new_lat, new_lon)
+            lat, lon, bearing, speed = position_at_elapsed(route, cumulative, elapsed)
 
-            bearing = math.degrees(math.atan2(new_lon - lon, new_lat - lat)) % 360
-            speed = random.uniform(5, 20)
-
-            send_position(truck_id, new_lat, new_lon, speed, bearing)
+            send_position(truck_id, lat, lon, speed, bearing)
 
         time.sleep(TICK_INTERVAL_SECONDS)
 
