@@ -54,11 +54,16 @@ curl -X POST http://localhost:5001/simulator/resume/truck-10
 # truck-10 resumes from where it paused, not teleported ahead
 ```
 
-Markers use three colors: green (`available`), grey (`stale`), and dark
+Markers use four colors: green (`available`), grey (`stale`), dark
 slate-blue `#34495e` (`off_shift` — the truck's seeded driver shift hasn't
-started yet, or has already ended). `off_shift` takes visual precedence over
-`stale` when both would apply. Trucks `truck-01` and `truck-11` are seeded
-with an already-ended shift, so they render off-shift from boot.
+started yet, or has already ended), and blue `#3498db` (`en_route` — the
+truck is currently assigned to a non-completed tow call). `off_shift` takes
+visual precedence over `en_route` and `stale` when more than one would
+apply. Trucks `truck-01` and `truck-11` are seeded with an already-ended
+shift, so they render off-shift from boot. Every status transition —
+including turning blue on confirm and clearing back to green on
+complete — updates the marker's color live within the same browser
+session; no page reload required.
 
 ## What's real and what's simplified
 
@@ -74,8 +79,27 @@ with an already-ended shift, so they render off-shift from boot.
   runtime dependency on that public server.
 - The live map is genuinely live: an initial REST snapshot, then WebSocket
   pushes on real accepted positions only (not polling, not a timer).
-- Truck status (`available`/`stale`/`off_shift`) is computed continuously
-  against the viewer's own clock — never stored, never goes stale itself.
+- Truck status (`available`/`stale`/`off_shift`/`en_route`) is computed
+  continuously against the viewer's own clock and live assignment state —
+  never stored, never goes stale itself.
+- The assignment engine is real, end to end: a PostGIS candidate prefilter
+  (matching truck type, currently on shift, not already assigned to a
+  non-completed call, nearest ~10 by real meters distance via a
+  `::geography` cast) feeds a pure, unit-tested `rank_candidates()`
+  function, and the confirm endpoint re-checks that specific truck's
+  eligibility fresh against the database rather than trusting the
+  candidate list it returned at create time.
+- Double-dispatching one truck to two tow calls at once is actually
+  prevented, not just discouraged: `assign_truck()`'s atomic conditional
+  `UPDATE` closes the normal race, and a database-level partial unique
+  index (`tow_calls_one_active_assignment_per_truck`, on
+  `tow_calls(assigned_truck_id) WHERE status != 'completed'`) is the real
+  backstop underneath it — Postgres itself refuses a second concurrent
+  assignment via index-level conflict detection, independent of
+  per-statement snapshot timing. This is the one schema change made
+  during Milestone 5, despite this plan's original "no schema changes"
+  constraint: it closes a genuine TOCTOU race under PostgreSQL's READ
+  COMMITTED isolation and was judged worth the exception.
 
 **Simplified, on purpose, for a 2-day demo:**
 - The 20 trucks are simulated, not real Teltonika hardware — the simulator
@@ -95,7 +119,22 @@ with an already-ended shift, so they render off-shift from boot.
   suite. That's a real coverage gap, named rather than hidden: the part of
   this system least familiar going in (PostGIS SQL under a non-transactional
   read-then-write) is exactly the part with no automated regression net.
-- No dispatcher assignment, ETA, or route planning yet — see Status below.
+- `on_job` is unreachable in practice: there's no real arrival-detection
+  signal (no geofence, no driver action) that would ever move a truck into
+  it, so it's named honestly in the status model rather than faked with a
+  timer or a fabricated trigger.
+- "Mark complete" is a dispatcher convenience this milestone added beyond
+  the original brief — a manual button, not a real job-completion
+  detection mechanism. Nothing watches the truck's actual position to
+  infer that a tow is done.
+- `GoogleRoutesEta` is implemented against Google's documented
+  `computeRouteMatrix` request/response shape, but has never been
+  exercised against a real API key — none was available in this
+  environment. `DistanceBasedEta` (straight-line haversine distance at a
+  fixed urban speed) is what every live demo actually uses; the two are
+  interchangeable behind one `EtaProvider` interface, selected by whether
+  `GOOGLE_ROUTES_API_KEY` is set.
+- No daily route planning yet — see Status below.
 
 ## Status
 
@@ -105,7 +144,9 @@ with an already-ended shift, so they render off-shift from boot.
 - [x] **Live console** — WebSocket-driven map, real route replay, manual
   stale-trigger toggle for demoing
 - [x] Truck/shift data (truck types, driver shifts)
-- [ ] Assignment engine (dispatcher picks a truck for a call, ranked by ETA)
+- [x] **Assignment engine** — PostGIS candidate prefilter, pure-function
+  ranking, stateless confirm-time eligibility recheck, and a
+  database-enforced guarantee against double-assigning one truck
 - [ ] ETA refresh (background job, pushed live)
 - [ ] Daily route planning with OR-Tools (nice to have)
 
@@ -118,11 +159,12 @@ with an already-ended shift, so they render off-shift from boot.
 - **Tracker gaps**: a real tracker loses signal in garages/underpasses far
   more than this simulator ever does; the staleness threshold and the
   dispatcher UI both need to make "no signal" visually distinct from "idle."
-- **Google Routes API cost and quotas**: this demo's ETA interface
-  (Milestone 5, not yet built) is designed so a distance-based default and a
-  real Google Routes provider are interchangeable behind one interface —
-  production would need real quota/cost monitoring and a fallback path when
-  the quota is hit.
+- **Google Routes API cost and quotas**: this demo's ETA interface is
+  designed so the distance-based default and a real Google Routes provider
+  are interchangeable behind one interface — but `GoogleRoutesEta` has
+  never run against a live key in this project, so production would need
+  that first real exercise plus quota/cost monitoring and a fallback path
+  when the quota is hit.
 - **Dispatcher override**: any ranked suggestion needs a manual override path
   — dispatchers know things the system doesn't (a truck that's actually
   broken down, a driver near end-of-shift).
