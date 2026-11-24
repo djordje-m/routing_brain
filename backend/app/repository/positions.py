@@ -40,10 +40,13 @@ async def insert_position(
 ) -> None:
     """Append a position to the `positions` history table.
 
-    `ON CONFLICT (truck_id, recorded_at) DO NOTHING` is a defensive safety
-    net matching `decide()`'s `duplicate_noop` intent, in case this is ever
-    called for a point `decide()` didn't actually clear — it shouldn't be,
-    per Task 5, but the constraint existing is free insurance.
+    `ON CONFLICT (truck_id, recorded_at) DO NOTHING` is load-bearing, not a
+    hypothetical safety net. `decide()` only ever compares against
+    `latest_positions`, so a re-delivered duplicate of a point that is NOT
+    the truck's current latest gets classified `stale_reject`, not
+    `duplicate_noop` -- and `stale_reject` still calls this function. This
+    `ON CONFLICT` is the only thing preventing that routine case from
+    raising a real unique-constraint violation on `(truck_id, recorded_at)`.
     """
     await pool.execute(
         """
@@ -72,8 +75,13 @@ async def upsert_latest_position(
     """Upsert a truck's latest known position into `latest_positions`.
 
     The `WHERE latest_positions.recorded_at < EXCLUDED.recorded_at` clause
-    is what actually prevents a regression; Task 5 is expected to only call
-    this for `"accept"` outcomes, but the guard is free insurance here too.
+    is load-bearing, not optional polish. The real call sequence
+    (`get_latest_recorded_at` -> `decide()` -> the writes) spans three
+    separate round-trips with no transaction wrapping them, so two
+    overlapping position forwards for the same truck can both read the
+    same stored "latest" and both get classified `"accept"`. Without this
+    `WHERE` clause, the older of the two writes could still land last and
+    overwrite `latest_positions` with a stale point.
     """
     await pool.execute(
         """

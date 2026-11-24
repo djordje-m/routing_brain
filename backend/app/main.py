@@ -16,7 +16,7 @@ from app.repository.positions import (
     upsert_latest_position,
 )
 from app.seed_trucks import seed_trucks
-from app.services.ingest import decide
+from app.services.ingest import apply_decision, decide
 
 logger = logging.getLogger(__name__)
 
@@ -77,15 +77,15 @@ async def ingest_position(request: Request):
         stored_latest_recorded_at = await get_latest_recorded_at(pool, truck_id)
         outcome = decide(recorded_at, stored_latest_recorded_at)
 
-        if outcome == "duplicate_noop":
-            pass
-        elif outcome == "stale_reject":
-            await insert_position(pool, truck_id, lat, lon, speed, heading, recorded_at)
-        elif outcome == "accept":
-            await insert_position(pool, truck_id, lat, lon, speed, heading, recorded_at)
-            await upsert_latest_position(
+        await apply_decision(
+            outcome,
+            insert=lambda: insert_position(
                 pool, truck_id, lat, lon, speed, heading, recorded_at
-            )
+            ),
+            upsert=lambda: upsert_latest_position(
+                pool, truck_id, lat, lon, speed, heading, recorded_at
+            ),
+        )
 
         return {"status": "ok", "outcome": outcome}
 
