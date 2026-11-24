@@ -107,6 +107,15 @@ def position_at_elapsed(
         pos_in_cycle if pos_in_cycle <= distance_m else cycle_length - pos_in_cycle
     )
 
+    # route["distance_m"] (the routing engine's stated total) and
+    # cumulative[-1] (our own recomputed haversine sum over `coordinates`)
+    # don't exactly agree -- for most routes distance_m is slightly larger.
+    # forward_distance is bounded by distance_m above, so without this clamp
+    # it can land past the last real coordinate (cumulative[-1]) on every
+    # cycle, extrapolating lat/lon off the actual street geometry instead of
+    # interpolating within it. Clamp it to the coordinates we actually have.
+    forward_distance = min(forward_distance, cumulative[-1])
+
     # Linear search for the segment containing forward_distance. Route
     # point counts here are small (low hundreds), so this is cheap enough
     # per tick; a bisect would also work but isn't needed at this scale.
