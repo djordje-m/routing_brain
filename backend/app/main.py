@@ -16,6 +16,7 @@ from app.repository.positions import (
     insert_position,
     upsert_latest_position,
 )
+from app.routers.tow_calls import router as tow_calls_router
 from app.routers.trucks import router as trucks_router
 from app.seed_shifts import seed_drivers_and_shifts
 from app.seed_trucks import seed_trucks
@@ -47,6 +48,7 @@ app.add_middleware(
 )
 
 app.include_router(trucks_router)
+app.include_router(tow_calls_router)
 
 
 @app.get("/health")
