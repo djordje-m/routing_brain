@@ -62,6 +62,16 @@ EARTH_RADIUS_M = 6371000
 paused_trucks: set[str] = set()
 paused_trucks_lock = threading.Lock()
 
+# Per-truck pause bookkeeping so a paused truck's virtual position freezes
+# instead of silently continuing to advance against the shared `elapsed`
+# clock. `pause_started_at` records when a truck was most recently paused
+# (time.monotonic() value); `pause_offsets` accumulates the total seconds
+# each truck has ever spent paused, which is subtracted from `elapsed`
+# before calling `position_at_elapsed()`. Both are guarded by the same
+# `paused_trucks_lock` used for `paused_trucks` -- no second lock needed.
+pause_started_at: dict[str, float] = {}
+pause_offsets: dict[str, float] = {}
+
 ROUTES = json.load(open(Path(__file__).parent / "routes.json"))
 ROUTES_BY_TRUCK = {r["truck_id"]: r for r in ROUTES}
 
@@ -202,13 +212,15 @@ def run_simulation_loop() -> None:
         for truck_id in TRUCK_IDS:
             with paused_trucks_lock:
                 is_paused = truck_id in paused_trucks
+                truck_pause_offset = pause_offsets.get(truck_id, 0.0)
             if is_paused:
                 continue
 
             route = ROUTES_BY_TRUCK[truck_id]
             cumulative = CUMULATIVE_BY_TRUCK[truck_id]
 
-            lat, lon, bearing, speed = position_at_elapsed(route, cumulative, elapsed)
+            effective_elapsed = elapsed - truck_pause_offset
+            lat, lon, bearing, speed = position_at_elapsed(route, cumulative, effective_elapsed)
 
             send_position(truck_id, lat, lon, speed, bearing)
 
@@ -237,6 +249,7 @@ async def pause_truck(truck_id: str):
         raise HTTPException(status_code=404, detail=f"unknown truck_id: {truck_id}")
     with paused_trucks_lock:
         paused_trucks.add(truck_id)
+        pause_started_at[truck_id] = time.monotonic()
     return {"status": "paused", "truck_id": truck_id}
 
 
@@ -244,6 +257,10 @@ async def pause_truck(truck_id: str):
 async def resume_truck(truck_id: str):
     with paused_trucks_lock:
         paused_trucks.discard(truck_id)
+        started_at = pause_started_at.pop(truck_id, None)
+        if started_at is not None:
+            pause_duration = time.monotonic() - started_at
+            pause_offsets[truck_id] = pause_offsets.get(truck_id, 0.0) + pause_duration
     return {"status": "resumed", "truck_id": truck_id}
 
 

@@ -27,9 +27,34 @@ function App() {
     let ws
     let cancelled = false
 
-    // Fetch the snapshot FIRST, then open the WebSocket only once it
-    // resolves -- opening the socket before/concurrently with the fetch
-    // could show a blank map until the next tick.
+    const openSocket = () => {
+      if (cancelled || ws) return
+      ws = new WebSocket(import.meta.env.VITE_WS_URL)
+      ws.onmessage = (event) => {
+        const envelope = JSON.parse(event.data)
+        if (envelope.type !== 'position_update') return
+        const update = envelope.data
+        setTrucks((prev) => ({
+          ...prev,
+          [update.truck_id]: {
+            ...(prev[update.truck_id] ?? {}),
+            truck_id: update.truck_id,
+            lat: update.lat,
+            lon: update.lon,
+            speed: update.speed,
+            heading: update.heading,
+            recorded_at: update.recorded_at,
+          },
+        }))
+      }
+    }
+
+    // Fetch the snapshot first and apply it to state before the WebSocket
+    // opens, so the happy path still shows the full snapshot before any
+    // live update lands. But the WS must open regardless of whether the
+    // fetch succeeds -- a failed/rejected fetch (e.g. CORS misconfig,
+    // network hiccup) must not block the live feed forever. `.finally()`
+    // opens the socket after the fetch settles either way.
     fetch(`${import.meta.env.VITE_API_BASE}/trucks/latest`)
       .then((res) => res.json())
       .then((data) => {
@@ -39,27 +64,12 @@ function App() {
           initial[truck.truck_id] = truck
         }
         setTrucks(initial)
-
-        ws = new WebSocket(import.meta.env.VITE_WS_URL)
-        ws.onmessage = (event) => {
-          const envelope = JSON.parse(event.data)
-          if (envelope.type !== 'position_update') return
-          const update = envelope.data
-          setTrucks((prev) => ({
-            ...prev,
-            [update.truck_id]: {
-              ...prev[update.truck_id],
-              lat: update.lat,
-              lon: update.lon,
-              speed: update.speed,
-              heading: update.heading,
-              recorded_at: update.recorded_at,
-            },
-          }))
-        }
       })
       .catch((err) => {
         console.error('Failed to load truck snapshot:', err)
+      })
+      .finally(() => {
+        openSocket()
       })
 
     return () => {

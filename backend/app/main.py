@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import FastAPI, Request, WebSocket
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.db import apply_schema, get_pool
 from app.repository.positions import (
@@ -32,6 +33,17 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+# Explicitly no-auth, short-lived demo: allow any origin so the frontend
+# (served from a different host/port than the backend) can fetch and
+# receive responses in a real browser. Not appropriate for production.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(trucks_router)
 
 
