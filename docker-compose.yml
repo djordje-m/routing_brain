@@ -32,6 +32,48 @@ services:
     ports:
       - "${TRACCAR_WEB_PORT:-8082}:8082"
       - "${TRACCAR_OSMAND_PORT:-5055}:5055"
+    environment:
+      # Position forwarding to the backend's future /ingest/position route
+      # (Task 5 implements the route; Task 4 only wires Traccar to call it).
+      #
+      # Verified live against traccar/traccar:6.17.0 (not from docs alone):
+      # - Traccar DOES read config from environment variables, but only
+      #   when CONFIG_USE_ENVIRONMENT_VARIABLES=true is also set (it is
+      #   not the default for this image's bundled conf/traccar.xml). The
+      #   mapping is: config key dots -> underscores, upper-cased, no
+      #   prefix (e.g. forward.url -> FORWARD_URL).
+      # - forward.type=json (FORWARD_TYPE) + forward.url (FORWARD_URL) is
+      #   enough to forward every stored position via HTTP POST with a
+      #   JSON body.
+      #
+      # Captured real payload (one truck, via the OsmAnd simulator) was:
+      #   {
+      #     "position": {
+      #       "id": 0, "deviceId": 1, "protocol": "osmand",
+      #       "serverTime": "...", "deviceTime": "...", "fixTime": "...",
+      #       "valid": true, "latitude": 44.8, "longitude": 20.4,
+      #       "altitude": 0.0, "speed": 10.0, "course": 90.0,
+      #       "accuracy": 0.0, "attributes": {...}
+      #     },
+      #     "device": {
+      #       "id": 1, "name": "truck-01", "uniqueId": "truck-01",
+      #       "status": "online", ...
+      #     }
+      #   }
+      #
+      # Device-identifier decision: forward.type=json nests the full
+      # Device object under "device", which carries "uniqueId" (our
+      # "truck-01" string) directly alongside the numeric "position.deviceId"
+      # / "device.id". This means Task 5's `get_truck_id_by_device` (keyed
+      # on the traccar_device_id string) can read `device["uniqueId"]`
+      # straight off the forwarded payload -- no deviceId->uniqueId cache
+      # or admin-API lookup is needed. Position fields to parse: latitude,
+      # longitude, speed (knots, per Traccar convention), course (this is
+      # the heading field -- Traccar does not call it "heading"), and
+      # fixTime (ISO-8601 string) as the recorded-at timestamp.
+      CONFIG_USE_ENVIRONMENT_VARIABLES: "true"
+      FORWARD_TYPE: "json"
+      FORWARD_URL: "http://backend:8000/ingest/position"
     volumes:
       - traccar_data:/opt/traccar/data
 
